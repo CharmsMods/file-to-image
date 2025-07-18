@@ -1,7 +1,9 @@
 /**
  * Text to Image Clipboard Module
- * Converts text to an image and copies it to the clipboard
+ * Embeds text as base64 data in a PNG and copies it to the clipboard
  */
+
+import { encodeFilesToCanvas } from '../utils/canvas.js';
 
 export class TextToImageClipboard {
     constructor(options = {}) {
@@ -80,8 +82,26 @@ export class TextToImageClipboard {
         if (!text) return;
 
         try {
-            // Render text to canvas
-            this.renderTextToCanvas(text);
+            // Convert text to ArrayBuffer
+            const encoder = new TextEncoder();
+            const textData = encoder.encode(text);
+            
+            // Create a file-like object with the text data
+            const file = {
+                name: 'text.txt',
+                type: 'text/plain',
+                data: textData.buffer
+            };
+            
+            // Encode the text data into the canvas as a PNG
+            await encodeFilesToCanvas(
+                this.canvas,
+                [file],
+                (progress) => {
+                    // Optional: Update progress if needed
+                    console.log(`Encoding progress: ${Math.round(progress * 100)}%`);
+                }
+            );
             
             // Convert canvas to blob
             const blob = await new Promise((resolve) => {
@@ -101,56 +121,19 @@ export class TextToImageClipboard {
             if (typeof this.options.onCopySuccess === 'function') {
                 this.options.onCopySuccess();
             } else {
-                this.showNotification('Image copied to clipboard!', 'success');
+                this.showNotification('Text copied as embedded PNG!', 'success');
             }
         } catch (error) {
-            console.error('Failed to copy image:', error);
+            console.error('Failed to process text:', error);
             if (typeof this.options.onCopyError === 'function') {
                 this.options.onCopyError(error);
             } else {
-                this.showNotification('Failed to copy image to clipboard', 'error');
+                this.showNotification('Failed to process text: ' + (error.message || 'Unknown error'), 'error');
             }
         }
     }
 
-    renderTextToCanvas(text) {
-        const { padding, backgroundColor, textColor, font } = this.options;
-        const ctx = this.ctx;
-        
-        // Set font
-        ctx.font = font;
-        ctx.textBaseline = 'top';
-        
-        // Split text into lines and calculate dimensions
-        const lines = text.split('\n');
-        const lineHeight = parseInt(font, 10) * 1.2; // 1.2 is line height
-        
-        // Calculate text dimensions
-        let maxWidth = 0;
-        lines.forEach(line => {
-            const metrics = ctx.measureText(line);
-            maxWidth = Math.max(maxWidth, metrics.width);
-        });
-        
-        // Set canvas dimensions with padding
-        const canvasWidth = maxWidth + (padding * 2);
-        const canvasHeight = (lineHeight * lines.length) + (padding * 2);
-        
-        this.canvas.width = canvasWidth;
-        this.canvas.height = canvasHeight;
-        
-        // Draw background
-        ctx.fillStyle = backgroundColor;
-        ctx.fillRect(0, 0, canvasWidth, canvasHeight);
-        
-        // Draw text
-        ctx.fillStyle = textColor;
-        ctx.font = font;
-        
-        lines.forEach((line, index) => {
-            ctx.fillText(line, padding, padding + (index * lineHeight));
-        });
-    }
+    // Removed renderTextToCanvas as we're now using the same encoding as file embedding
 
     showNotification(message, type = 'info') {
         // Remove existing notification if any
