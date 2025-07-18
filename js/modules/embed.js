@@ -1,16 +1,111 @@
 // Embed tab functionality
 import { showError, AppError } from '../utils/error.js';
-import { readFileAsArrayBuffer } from '../utils/file.js';
+import { readFileAsArrayBuffer, formatFileSize, sanitizeFilename } from '../utils/file.js';
 import { createWorker, terminateWorker } from '../utils/worker.js';
-import { calculateCanvasSize, encodeFileToCanvas } from '../utils/canvas.js';
+import { calculateCanvasSizeForFiles, encodeFilesToCanvas } from '../utils/canvas.js';
 
 // Constants
 const DEFAULT_MAX_SIZE_MB = 10;
+const MAX_TOTAL_SIZE_MB = 20; // Maximum total size for all files
 const WORKER_CHUNK_SIZE = 1024 * 1024 * 2; // 2MB chunks for worker
 
 // DOM Elements
-let fileInput, maxSizeInput, previewCanvas, downloadBtn, showRawBtn, rawDataTextarea;
-let currentFile = null;
+let fileInput, maxSizeInput, previewCanvas, downloadBtn, showRawBtn, rawDataTextarea, fileListEl;
+let selectedFiles = [];
+
+// Helper function to update the file list UI
+function updateFileList() {
+    if (!fileListEl) return;
+    
+    fileListEl.innerHTML = '';
+    
+    if (selectedFiles.length === 0) {
+        const emptyMsg = document.createElement('div');
+        emptyMsg.className = 'empty-message';
+        emptyMsg.textContent = 'No files selected';
+        fileListEl.appendChild(emptyMsg);
+        return;
+    }
+    
+    // Calculate total size
+    const totalSize = selectedFiles.reduce((sum, file) => sum + file.size, 0);
+    const totalSizeMB = totalSize / (1024 * 1024);
+    
+    // Add file items
+    selectedFiles.forEach((file, index) => {
+        const fileItem = document.createElement('div');
+        fileItem.className = 'file-item';
+        fileItem.dataset.index = index;
+        
+        const fileInfo = document.createElement('div');
+        fileInfo.className = 'file-item-info';
+        
+        const fileName = document.createElement('span');
+        fileName.className = 'file-item-name';
+        fileName.textContent = sanitizeFilename(file.name);
+        
+        const fileSize = document.createElement('span');
+        fileSize.className = 'file-item-size';
+        fileSize.textContent = `(${formatFileSize(file.size)})`;
+        
+        const removeBtn = document.createElement('button');
+        removeBtn.className = 'file-item-remove';
+        removeBtn.innerHTML = '&times;';
+        removeBtn.title = 'Remove file';
+        removeBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            removeFile(index);
+        });
+        
+        fileInfo.appendChild(fileName);
+        fileInfo.appendChild(fileSize);
+        fileItem.appendChild(fileInfo);
+        fileItem.appendChild(removeBtn);
+        fileListEl.appendChild(fileItem);
+    });
+    
+    // Update file info
+    const fileInfo = document.querySelector('.file-info');
+    if (fileInfo) {
+        fileInfo.textContent = `${selectedFiles.length} file(s) selected, ${totalSizeMB.toFixed(2)} MB total`;
+    }
+}
+
+// Helper function to remove a file from the selection
+function removeFile(index) {
+    if (index >= 0 && index < selectedFiles.length) {
+        selectedFiles.splice(index, 1);
+        updateFileList();
+    }
+}
+
+// Helper function to validate file size
+function validateFileSize(file, maxSizeMB) {
+    const maxSize = maxSizeMB * 1024 * 1024;
+    if (file.size > maxSize) {
+        throw new AppError(`File "${file.name}" is too large. Maximum size is ${maxSizeMB}MB.`);
+    }
+}
+
+// Helper function to validate total size
+function validateTotalSize(files, maxTotalSizeMB) {
+    const maxTotalSize = maxTotalSizeMB * 1024 * 1024;
+    const totalSize = files.reduce((sum, file) => sum + file.size, 0);
+    
+    if (totalSize > maxTotalSize) {
+        throw new AppError(`Total size of selected files (${formatFileSize(totalSize)}) exceeds the maximum limit of ${maxTotalSizeMB}MB.`);
+    }
+}
+
+// Helper function to read a file as ArrayBuffer
+async function readFile(file) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (e) => resolve(e.target.result);
+        reader.onerror = (e) => reject(new Error('Error reading file'));
+        reader.readAsArrayBuffer(file);
+    });
+}
 
 // Initialize the embed tab
 export function initEmbedTab() {
@@ -21,6 +116,10 @@ export function initEmbedTab() {
     downloadBtn = document.getElementById('download-btn');
     showRawBtn = document.getElementById('show-raw-btn');
     rawDataTextarea = document.getElementById('raw-data');
+    fileListEl = document.getElementById('file-list');
+    
+    // Set initial state
+    updateFileList();
     
     // Set default max size
     maxSizeInput.value = DEFAULT_MAX_SIZE_MB;
@@ -33,6 +132,24 @@ function setupEventListeners() {
     // File input change
     fileInput.addEventListener('change', handleFileSelect);
     
+    // Allow drag and drop
+    const dropZone = document.querySelector('.file-upload-container');
+    if (dropZone) {
+        ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, preventDefaults, false);
+        });
+        
+        ['dragenter', 'dragover'].forEach(eventName => {
+            dropZone.addEventListener(eventName, highlight, false);
+        });
+        
+        ['dragleave', 'drop'].forEach(eventName => {
+            dropZone.addEventListener(eventName, unhighlight, false);
+        });
+        
+        dropZone.addEventListener('drop', handleDrop, false);
+    }
+    
     // Download button
     downloadBtn.addEventListener('click', handleDownload);
     
@@ -44,56 +161,123 @@ function setupEventListeners() {
     if (copyBtn) {
         copyBtn.addEventListener('click', copyToClipboard);
     }
+    
+    // Max size input change
+    maxSizeInput.addEventListener('change', () => {
+        try {
+            const maxSize = parseInt(maxSizeInput.value) || DEFAULT_MAX_SIZE_MB;
+            validateTotalSize(selectedFiles, maxSize);
+        } catch (error) {
+            showError(error.message);
+            maxSizeInput.value = DEFAULT_MAX_SIZE_MB;
+        }
+    });
 }
 
-async function handleFileSelect(event) {
-    const file = event.target.files[0];
-    if (!file) return;
-    
+function preventDefaults(e) {
+    e.preventDefault();
+    e.stopPropagation();
+}
+
+function highlight() {
+    document.querySelector('.file-upload-container').classList.add('highlight');
+}
+
+function unhighlight() {
+    document.querySelector('.file-upload-container').classList.remove('highlight');
+}
+
+function handleDrop(e) {
+    const dt = e.dataTransfer;
+    const files = dt.files;
+    handleFiles(files);
+}
+
+async function handleFiles(files) {
     try {
-        // Check file size
-        const maxSizeMB = parseInt(maxSizeInput.value) || DEFAULT_MAX_SIZE_MB;
-        const maxSizeBytes = maxSizeMB * 1024 * 1024;
+        const maxSize = parseInt(maxSizeInput.value) || DEFAULT_MAX_SIZE_MB;
+        const newFiles = Array.from(files);
         
-        if (file.size > maxSizeBytes) {
-            throw new AppError(`File is too large. Maximum size is ${maxSizeMB}MB.`);
-        }
+        // Validate new files
+        newFiles.forEach(file => validateFileSize(file, maxSize));
         
-        currentFile = file;
+        // Add new files to selection
+        selectedFiles = [...selectedFiles, ...newFiles];
         
-        // Show processing modal
-        showProcessingModal(true);
-        updateProgress(0, 'Reading file...');
+        // Validate total size
+        validateTotalSize(selectedFiles, MAX_TOTAL_SIZE_MB);
         
-        // Read file as ArrayBuffer
-        const arrayBuffer = await readFileAsArrayBuffer(file);
-        
-        // Calculate canvas size
-        const { width, height } = calculateCanvasSize(arrayBuffer.byteLength);
-        
-        // Update progress
-        updateProgress(30, 'Encoding data to image...');
-        
-        // Encode file to canvas
-        await encodeFileToCanvas(previewCanvas, arrayBuffer, file.name, file.type, (progress) => {
-            updateProgress(30 + Math.floor(progress * 60), 'Encoding data to image...');
-        });
-        
-        // Show preview and download button
-        document.querySelector('.preview-container').classList.remove('hidden');
-        
-        // Update file info
-        updateFileInfo(file);
-        
-        // Hide processing modal
-        showProcessingModal(false);
+        // Update UI
+        updateFileList();
         
     } catch (error) {
-        showProcessingModal(false);
-        if (!(error instanceof AppError)) {
-            console.error('Error processing file:', error);
-            showError('An error occurred while processing the file. Please try again.');
+
+async function handleFileSelect(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    
+    try {
+        await handleFiles(files);
+    } catch (error) {
+        showError(error.message);
+    } finally {
+        // Reset file input to allow selecting the same files again
+        event.target.value = '';
+    }
+}
+
+async function encodeSelectedFiles() {
+    if (selectedFiles.length === 0) {
+        throw new AppError('No files selected. Please add files first.');
+    }
+    
+    try {
+        // Show loading state
+        downloadBtn.disabled = true;
+        downloadBtn.textContent = 'Processing...';
+        
+        // Prepare files array with data
+        const filesWithData = [];
+        let processedCount = 0;
+        
+        // Read all files as ArrayBuffer
+        for (const file of selectedFiles) {
+            try {
+                const arrayBuffer = await readFileAsArrayBuffer(file);
+                filesWithData.push({
+                    name: file.name,
+                    type: file.type || 'application/octet-stream',
+                    data: arrayBuffer
+                });
+                
+                // Update progress
+                processedCount++;
+                const progress = processedCount / selectedFiles.length * 100;
+                downloadBtn.textContent = `Processing ${processedCount} of ${selectedFiles.length}... ${Math.round(progress)}%`;
+                
+            } catch (error) {
+                console.error(`Error reading file ${file.name}:`, error);
+                throw new AppError(`Error reading file: ${file.name}. ${error.message}`);
+            }
         }
+        
+        // Encode all files to canvas
+        await encodeFilesToCanvas(
+            previewCanvas,
+            filesWithData,
+            (progress) => {
+                const percent = Math.round(progress * 100);
+                downloadBtn.textContent = `Encoding... ${percent}%`;
+            }
+        );
+        
+        // Enable download button
+        downloadBtn.disabled = false;
+        downloadBtn.textContent = `Download ${selectedFiles.length} file(s) as PNG`;
+        
+    } catch (error) {
+        console.error('Error processing file:', error);
+        showError('An error occurred while processing the file. Please try again.');
     }
 }
 
@@ -111,36 +295,76 @@ function updateFileInfo(file) {
 }
 
 async function handleDownload() {
-    if (!previewCanvas) return;
+    if (!previewCanvas || selectedFiles.length === 0) {
+        showError('No files selected or encoded yet.');
+        return;
+    }
     
     try {
-        // Convert canvas to blob
-        const blob = await new Promise((resolve) => {
+        // If files haven't been encoded yet, encode them first
+        if (downloadBtn.textContent.includes('Select files first') || 
+            downloadBtn.textContent.includes('Try again')) {
+            await encodeSelectedFiles();
+        }
+        
+        // Create a download link
+        const link = document.createElement('a');
+        
+        // Set the download filename
+        let filename = 'files';
+        if (selectedFiles.length === 1) {
+            filename = selectedFiles[0].name.replace(/\.[^/.]+$/, '') || 'file';
+        }
+        filename += '.png';
+        
+        link.download = filename;
+        
+        // Convert canvas to blob and create object URL
+        const blob = await new Promise(resolve => {
             previewCanvas.toBlob(resolve, 'image/png');
         });
         
-        if (!blob) {
-            throw new AppError('Failed to create image. Please try again.');
-        }
-        
-        // Create download link
         const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        a.download = currentFile ? `${currentFile.name}.png` : 'file.png';
-        document.body.appendChild(a);
-        a.click();
+        link.href = url;
+        
+        // Show a success message
+        const message = selectedFiles.length === 1 
+            ? `Downloading ${selectedFiles[0].name} as PNG...`
+            : `Downloading ${selectedFiles.length} files as PNG image...`;
+        
+        showSuccess(message);
+        
+        // Trigger download
+        document.body.appendChild(link);
+        link.click();
         
         // Clean up
         setTimeout(() => {
-            document.body.removeChild(a);
+            document.body.removeChild(link);
             URL.revokeObjectURL(url);
         }, 100);
         
     } catch (error) {
-        console.error('Download error:', error);
-        showError('Failed to download image. Please try again.');
+        console.error('Error downloading file:', error);
+        showError(error.message || 'An error occurred while downloading the file.');
     }
+}
+
+// Helper function to show success message
+function showSuccess(message) {
+    const successEl = document.createElement('div');
+    successEl.className = 'success-message';
+    successEl.textContent = message;
+    
+    // Add to DOM
+    const container = document.querySelector('.container');
+    container.insertBefore(successEl, container.firstChild);
+    
+    // Remove after delay
+    setTimeout(() => {
+        successEl.classList.add('fade-out');
+        setTimeout(() => successEl.remove(), 300);
+    }, 3000);
 }
 
 function toggleRawData() {
