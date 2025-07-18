@@ -211,6 +211,9 @@ async function handleFiles(files) {
         updateFileList();
         
     } catch (error) {
+        showError(error.message);
+        throw error; // Re-throw to allow caller to handle if needed
+    }
 
 async function handleFileSelect(event) {
     const files = event.target.files;
